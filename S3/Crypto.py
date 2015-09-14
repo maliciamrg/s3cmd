@@ -55,15 +55,29 @@ __all__.append("sign_url_v2")
 
 def sign_url_base_v2(**parms):
     """Shared implementation of sign_url methods. Takes a hash of 'bucket', 'object' and 'expiry' as args."""
+    content_disposition=Config.Config().content_disposition
+    content_type=Config.Config().content_type
     parms['expiry']=time_to_epoch(parms['expiry'])
     parms['access_key']=Config.Config().access_key
     parms['host_base']=Config.Config().host_base
     debug("Expiry interpreted as epoch time %s", parms['expiry'])
     signtext = 'GET\n\n\n%(expiry)d\n/%(bucket)s/%(object)s' % parms
+    param_separator = '?'
+    if content_disposition is not None:
+        signtext += param_separator + 'response-content-disposition=' + content_disposition
+        param_separator = '&'
+    if content_type is not None:
+        signtext += param_separator + 'response-content-type=' + content_type
+        param_separator = '&'
     debug("Signing plaintext: %r", signtext)
     parms['sig'] = urllib.quote_plus(sign_string_v2(signtext))
     debug("Urlencoded signature: %s", parms['sig'])
-    return "http://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
+    url = "http://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
+    if content_disposition is not None:
+        url += "&response-content-disposition=" + urllib.quote_plus(content_disposition)
+    if content_type is not None:
+        url += "&response-content-type=" + urllib.quote_plus(content_type)
+    return url
 
 def sign(key, msg):
     return hmac.new(key, encode_to_s3(msg), sha256).digest()
@@ -152,8 +166,12 @@ def checksum_sha256_file(filename, offset=0, size=None):
                 hash.update(chunk)
         else:
             f.seek(offset)
-            chunk = f.read(size)
-            hash.update(chunk)
+            size_left = size
+            while size_left > 0:
+                chunk = f.read(min(8192, size_left))
+                size_left -= len(chunk)
+                hash.update(chunk)
+
     return hash
 
 def checksum_sha256_buffer(buffer, offset=0, size=None):

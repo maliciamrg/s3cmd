@@ -33,33 +33,49 @@ from MultiPart import MultiPartUpload
 from S3Uri import S3Uri
 from ConnMan import ConnMan
 from Crypto import sign_string_v2, sign_string_v4, checksum_sha256_file, checksum_sha256_buffer
-from ExitCodes import *
 
 try:
+    from ctypes import ArgumentError
     import magic
     try:
         ## https://github.com/ahupp/python-magic
+        ## Always expect unicode for python 2
+        ## (has Magic class but no "open()" function)
         magic_ = magic.Magic(mime=True)
         def mime_magic_file(file):
             return magic_.from_file(file)
     except TypeError:
-        ## http://pypi.python.org/pypi/filemagic
         try:
-            magic_ = magic.Magic(flags=magic.MAGIC_MIME)
-            def mime_magic_file(file):
-                return magic_.id_filename(file)
-        except TypeError:
             ## file-5.11 built-in python bindings
+            ## Sources: http://www.darwinsys.com/file/
+            ## Expects unicode since version 5.19, encoded strings before
+            ## we can't tell if a given copy of the magic library will take a
+            ## filesystem-encoded string or a unicode value, so try first
+            ## with the unicode, then with the encoded string.
+            ## (has Magic class and "open()" function)
             magic_ = magic.open(magic.MAGIC_MIME)
             magic_.load()
             def mime_magic_file(file):
-                return magic_.file(file)
+                try:
+                    return magic_.file(file)
+                except (UnicodeDecodeError, UnicodeEncodeError, ArgumentError):
+                    return magic_.file(deunicodise(file))
+        except AttributeError:
+            ## http://pypi.python.org/pypi/filemagic
+            ## Accept gracefully both unicode and encoded
+            ## (has Magic class but not "mime" argument and no "open()" function )
+            magic_ = magic.Magic(flags=magic.MAGIC_MIME)
+            def mime_magic_file(file):
+                return magic_.id_filename(file)
+
     except AttributeError:
-        ## Older python-magic versions
+        ## Older python-magic versions doesn't have a "Magic" method
+        ## Only except encoded strings
+        ## (has no Magic class but "open()" function)
         magic_ = magic.open(magic.MAGIC_MIME)
         magic_.load()
         def mime_magic_file(file):
-            return magic_.file(file)
+            return magic_.file(deunicodise(file))
 
 except ImportError, e:
     if 'magic' in str(e):
@@ -76,15 +92,9 @@ except ImportError, e:
         return mimetypes.guess_type(file)[0]
 
 def mime_magic(file):
-    # we can't tell if a given copy of the magic library will take a
-    # filesystem-encoded string or a unicode value, so try first
-    # with the encoded string, then unicode.
+    ## NOTE: So far in the code, "file" var is already unicode
     def _mime_magic(file):
-        magictype = None
-        try:
-            magictype = mime_magic_file(file)
-        except UnicodeDecodeError:
-            magictype = mime_magic_file(unicodise(file))
+        magictype = mime_magic_file(file)
         return magictype
 
     result = _mime_magic(file)
@@ -268,6 +278,19 @@ class S3(object):
         return response
 
     def bucket_list(self, bucket, prefix = None, recursive = None, uri_params = {}):
+        item_list = []
+        prefixes = []
+        for dirs, objects in self.bucket_list_streaming(bucket, prefix, recursive, uri_params):
+            item_list.extend(objects)
+            prefixes.extend(dirs)
+
+        response = {}
+        response['list'] = item_list
+        response['common_prefixes'] = prefixes
+        return response
+
+    def bucket_list_streaming(self, bucket, prefix = None, recursive = None, uri_params = {}):
+        """ Generator that produces <dir_list>, <object_list> pairs of groups of content of a specified bucket. """
         def _list_truncated(data):
             ## <IsTruncated> can either be "true" or "false" or be missing completely
             is_truncated = getTextFromXml(data, ".//IsTruncated") or "false"
@@ -279,10 +302,8 @@ class S3(object):
         def _get_common_prefixes(data):
             return getListFromXml(data, "CommonPrefixes")
 
-
         uri_params = uri_params.copy()
         truncated = True
-        list = []
         prefixes = []
 
         while truncated:
@@ -297,12 +318,7 @@ class S3(object):
                     uri_params['marker'] = self.urlencode_string(current_prefixes[-1]["Prefix"])
                 debug("Listing continues after '%s'" % uri_params['marker'])
 
-            list += current_list
-            prefixes += current_prefixes
-
-        response['list'] = list
-        response['common_prefixes'] = prefixes
-        return response
+            yield current_prefixes, current_list
 
     def bucket_list_noparse(self, bucket, prefix = None, recursive = None, uri_params = {}):
         if prefix:
@@ -599,15 +615,21 @@ class S3(object):
         response = self.send_file(request, file, labels)
         return response
 
-    def object_get(self, uri, stream, start_position = 0, extra_label = ""):
+    def object_get(self, uri, stream, dest_name, start_position = 0, extra_label = ""):
         if uri.type != "s3":
             raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
         request = self.create_request("OBJECT_GET", uri = uri)
-        labels = { 'source' : uri.uri(), 'destination' : unicodise(stream.name), 'extra' : extra_label }
+        labels = { 'source' : uri.uri(), 'destination' : dest_name, 'extra' : extra_label }
         response = self.recv_file(request, stream, labels, start_position)
         return response
 
     def object_batch_delete(self, remote_list):
+        """ Batch delete given a remote_list """
+        uris = [remote_list[item]['object_uri_str'] for item in remote_list]
+        self.object_batch_delete_uri_strs(uris)
+
+    def object_batch_delete_uri_strs(self, uris):
+        """ Batch delete given a list of object uris """
         def compose_batch_del_xml(bucket, key_list):
             body = u"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Delete>"
             for key in key_list:
@@ -624,7 +646,7 @@ class S3(object):
             body = encode_to_s3(body)
             return body
 
-        batch = [remote_list[item]['object_uri_str'] for item in remote_list]
+        batch = uris
         if len(batch) == 0:
             raise ValueError("Key list is empty")
         bucket = S3Uri(batch[0]).bucket()
@@ -810,6 +832,27 @@ class S3(object):
         response = self.send_request(request)
         return response
 
+    def get_cors(self, uri):
+        request = self.create_request("BUCKET_LIST", bucket = uri.bucket(), extra = "?cors")
+        response = self.send_request(request)
+        return response['data']
+
+    def set_cors(self, uri, cors):
+        headers = {}
+        # TODO check cors is proper json string
+        headers['content-type'] = 'application/xml'
+        headers['content-md5'] = compute_content_md5(cors)
+        request = self.create_request("BUCKET_CREATE", uri = uri,
+                                      extra = "?cors", headers=headers, body = cors)
+        response = self.send_request(request)
+        return response
+
+    def delete_cors(self, uri):
+        request = self.create_request("BUCKET_DELETE", uri = uri, extra = "?cors")
+        debug(u"delete_cors(%s)" % uri)
+        response = self.send_request(request)
+        return response
+
     def set_lifecycle_policy(self, uri, policy):
         headers = SortedDict(ignore_case = True)
         headers['content-md5'] = compute_content_md5(policy)
@@ -972,8 +1015,7 @@ class S3(object):
                 self.fallback_to_signature_v2 = True
                 return fn(*args, **kwargs)
 
-        error(u"S3 error: %s" % message)
-        sys.exit(ExitCodes.EX_GENERAL)
+        raise S3Error(response)
 
     def _http_403_handler(self, request, response, fn, *args, **kwargs):
         message = 'Unknown error'
@@ -987,8 +1029,7 @@ class S3(object):
                         self.fallback_to_signature_v2 = True
                         return fn(*args, **kwargs)
 
-        error(u"S3 error: %s" % message)
-        sys.exit(ExitCodes.EX_GENERAL)
+        raise S3Error(response)
 
     def send_request(self, request, retries = _max_retries):
         method_string, resource, headers = request.get_triplet()
@@ -1066,7 +1107,7 @@ class S3(object):
 
     def send_file(self, request, file, labels, buffer = '', throttle = 0, retries = _max_retries, offset = 0, chunk_size = -1):
         method_string, resource, headers = request.get_triplet()
-        if S3Request.region_map.get(request.resource['bucket'], None) is None:
+        if S3Request.region_map.get(request.resource['bucket'], Config().bucket_location) is None:
             s3_uri = S3Uri(u's3://' + request.resource['bucket'])
             region = self.get_bucket_location(s3_uri)
             if region is not None:
@@ -1237,6 +1278,11 @@ class S3(object):
         response["elapsed"] = timestamp_end - timestamp_start
         response["size"] = size
         response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
+        if response["data"] and getRootTagName(response["data"]) == "Error":
+            #http://docs.aws.amazon.com/AmazonS3/latest/API/mpUploadComplete.html
+            # Error Complete Multipart UPLOAD, status may be 200
+            # raise S3UploadError
+            raise S3UploadError(getTextFromXml(response["data"], 'Message'))
         return response
 
     def recv_file(self, request, stream, labels, start_position = 0, retries = _max_retries):
@@ -1380,40 +1426,41 @@ class S3(object):
             progress.update()
             progress.done("done")
 
-        if start_position == 0:
-            # Only compute MD5 on the fly if we were downloading from the beginning
-            response["md5"] = md5_hash.hexdigest()
-        else:
-            # Otherwise try to compute MD5 of the output file
-            try:
-                response["md5"] = hash_file_md5(filename)
-            except IOError, e:
-                if e.errno != errno.ENOENT:
-                    warning("Unable to open file: %s: %s" % (filename, e))
-                warning("Unable to verify MD5. Assume it matches.")
-                response["md5"] = response["headers"]["etag"]
-
-        md5_hash = response["headers"]["etag"]
+        md5_from_s3 = response["headers"]["etag"].strip('"')
         if not 'x-amz-meta-s3tools-gpgenc' in response["headers"]:
             # we can't trust our stored md5 because we
             # encrypted the file after calculating it but before
             # uploading it.
             try:
-                md5_hash = response["s3cmd-attrs"]["md5"]
+                md5_from_s3 = response["s3cmd-attrs"]["md5"]
             except KeyError:
                 pass
+        # we must have something to compare against to bother with the calculation
+        if '-' not in md5_from_s3:
+            if start_position == 0:
+                # Only compute MD5 on the fly if we were downloading from the beginning
+                response["md5"] = md5_hash.hexdigest()
+            else:
+                # Otherwise try to compute MD5 of the output file
+                try:
+                    response["md5"] = hash_file_md5(filename)
+                except IOError, e:
+                    if e.errno != errno.ENOENT:
+                        warning("Unable to open file: %s: %s" % (filename, e))
+                    warning("Unable to verify MD5. Assume it matches.")
 
-        response["md5match"] = response["md5"] in md5_hash
+        response["md5match"] = response.get("md5") == md5_from_s3
         response["elapsed"] = timestamp_end - timestamp_start
         response["size"] = current_position
         response["speed"] = response["elapsed"] and float(response["size"]) / response["elapsed"] or float(-1)
         if response["size"] != start_position + long(response["headers"]["content-length"]):
             warning("Reported size (%s) does not match received size (%s)" % (
                 start_position + long(response["headers"]["content-length"]), response["size"]))
-        debug("ReceiveFile: Computed MD5 = %s" % response["md5"])
-        if not response["md5match"]:
+        debug("ReceiveFile: Computed MD5 = %s" % response.get("md5"))
+        # avoid ETags from multipart uploads that aren't the real md5
+        if '-' not in md5_from_s3 and not response["md5match"]:
             warning("MD5 signatures do not match: computed=%s, received=%s" % (
-                response["md5"], md5_hash))
+                response.get("md5"), md5_from_s3))
         return response
 __all__.append("S3")
 

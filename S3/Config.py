@@ -32,10 +32,10 @@ class Config(object):
     simpledb_host = "sdb.amazonaws.com"
     cloudfront_host = "cloudfront.amazonaws.com"
     verbosity = logging.WARNING
-    progress_meter = True
+    progress_meter = sys.stdout.isatty()
     progress_class = Progress.ProgressCR
-    send_chunk = 4096
-    recv_chunk = 4096
+    send_chunk = 64 * 1024
+    recv_chunk = 64 * 1024
     list_md5 = False
     long_listing = False
     human_readable_sizes = False
@@ -80,7 +80,7 @@ class Config(object):
     gpg_command = ""
     gpg_encrypt = "%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
     gpg_decrypt = "%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
-    use_https = False
+    use_https = True
     ca_certs_file = ""
     check_ssl_certificate = True
     bucket_location = "US"
@@ -116,13 +116,15 @@ class Config(object):
     cache_file = ""
     add_headers = ""
     remove_headers = []
-    ignore_failed_copy = False
     expiry_days = ""
     expiry_date = ""
     expiry_prefix = ""
     signature_v2 = False
     limitrate = 0
     requester_pays = False
+    stop_on_error = False
+    content_disposition = None
+    content_type = None
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None):

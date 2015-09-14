@@ -275,7 +275,7 @@ part is empty and s3cmd will only create 'dir1' and 'dir2'
 without the 'somewhere/' prefix:
 
 ```
-$ s3cmd get --recursive s3://public.s3tools.org/somewhere ~/
+$ s3cmd get --recursive s3://public.s3tools.org/somewhere/ ~/
 
 File s3://public.s3tools.org/somewhere/dir1/file1-1.txt saved as '~/dir1/file1-1.txt'
 File s3://public.s3tools.org/somewhere/dir1/file1-2.txt saved as '~/dir1/file1-2.txt'
@@ -322,6 +322,8 @@ The basic usage is as simple as described in the previous section.
 You can increase the level of verbosity with `-v` option and if you're really keen to know what the program does under its bonnet run it with `-d` to see all 'debugging' output.
 
 After configuring it with `--configure` all available options are spitted into your `~/.s3cfg` file. It's a text file ready to be modified in your favourite text editor.
+
+The Transfer commands (put, get, cp, mv, and sync) continue transferring even if an object fails. If a failure occurs the failure is output to stderr and the exit status will be EX_PARTIAL (2). If the option `--stop-on-error` is specified, or the config option stop_on_error is true, the transfers stop and an appropriate error code is returned.
 
 For more information refer to the [S3cmd / S3tools homepage](http://s3tools.org).
 
