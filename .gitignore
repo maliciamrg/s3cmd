@@ -7,3 +7,14 @@ testsuite-out
 build/*
 s3cmd.spec
 .idea
+# ignore_for_eclipse
+/bin/
+.classpath
+.project
+
+# ignore_for_eclipse
+/bin/
+.classpath
+.project
+
+
